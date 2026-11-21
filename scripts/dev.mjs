@@ -7,7 +7,8 @@ const cli = path.join(path.dirname(require.resolve("electron-vite/package.json")
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
 
-const child = spawn(process.execPath, [cli, "dev"], {
+// --watch: restart Electron when main/preload code changes, not only reload the page.
+const child = spawn(process.execPath, [cli, "dev", "--watch"], {
   cwd: process.cwd(),
   env,
   stdio: "inherit",

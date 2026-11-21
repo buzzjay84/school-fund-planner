@@ -1,0 +1,143 @@
+name: Release
+
+# Releasing is: bump package.json's version, update RELEASE_NOTES.md, commit, push to main.
+# A version is released once: a draft release is created, the Windows and macOS builds
+# upload into it, and it is published once the Windows build succeeds. The macOS build
+# uploads into the same release (draft or published), so a failed Mac build never holds
+# back the Windows update; rerun it from the Actions tab. The installed app's
+# Help > Check for Updates reads the published release (latest.yml / latest-mac.yml).
+# Pushes whose version is already released do nothing.
+#
+# Rerun by hand from the Actions tab (Run workflow) if a build failed.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      release: ${{ steps.version.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: package.json
+          sparse-checkout-cone-mode: false
+
+      - name: Is this version new?
+        id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          TAG="v$(node -p "require('./package.json').version")"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          if [ "$(gh release view "$TAG" --repo "${{ github.repository }}" --json isDraft --jq .isDraft 2>/dev/null)" = "false" ]; then
+            echo "$TAG is already released; nothing to do."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Releasing $TAG."
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  create-release:
+    needs: check-version
+    if: needs.check-version.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ needs.check-version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create the draft release the builds upload into
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" --repo "${{ github.repository }}" --target "$GITHUB_SHA" --notes-file RELEASE_NOTES.md
+            echo "Draft release $RELEASE_TAG exists; the builds will upload into it."
+          else
+            gh release create "$RELEASE_TAG" --repo "${{ github.repository }}" --draft --target "$GITHUB_SHA" --title "${RELEASE_TAG#v}" --notes-file RELEASE_NOTES.md
+          fi
+
+  build-windows:
+    needs: [check-version, create-release]
+    runs-on: windows-latest
+    env:
+      RELEASE_TAG: ${{ needs.check-version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+      - run: npm test
+
+      - name: Build Windows installer
+        run: npm run dist:win
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: gh release upload "$RELEASE_TAG" release/School-Fund-Planner-Setup-*.exe release/School-Fund-Planner-Setup-*.exe.blockmap release/latest.yml --repo "${{ github.repository }}" --clobber
+
+  build-macos:
+    needs: [check-version, create-release]
+    runs-on: macos-latest
+    env:
+      RELEASE_TAG: ${{ needs.check-version.outputs.tag }}
+      # No Apple Developer certificate: build unsigned. macOS users install the .dmg by hand
+      # (right-click > Open the first time); the app sends them to the release page for updates.
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+      - run: npm test
+
+      - name: Build macOS app (Intel and Apple silicon)
+        run: npm run dist:mac
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: gh release upload "$RELEASE_TAG" release/*.dmg release/*.zip release/*.blockmap release/latest-mac.yml --repo "${{ github.repository }}" --clobber
+
+  publish-release:
+    needs: [check-version, build-windows]
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ needs.check-version.outputs.tag }}
+    steps:
+      - name: Check the update files are there, then publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          ASSETS="$(gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" --json assets --jq '.assets[].name')"
+          echo "$ASSETS"
+          # The installed apps read these to find updates; publishing without them breaks updating.
+          echo "$ASSETS" | grep -qx latest.yml || { echo "::error::latest.yml is missing; release left as draft."; exit 1; }
+          echo "$ASSETS" | grep -q '\.exe$' || { echo "::error::Windows installer is missing; release left as draft."; exit 1; }
+          gh release edit "$RELEASE_TAG" --draft=false --latest --repo "${{ github.repository }}"

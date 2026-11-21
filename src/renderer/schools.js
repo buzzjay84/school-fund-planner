@@ -72,3 +72,18 @@ export const SCHOOLS = [
 ];
 
 export const isSecondary = (name) => /high school|- secondary/i.test(name);
+
+// Districts and their schools by DepEd School ID, from the district pages of https://www.depedisabelacity.org/ (Nov 2026).
+// Secondary schools are not on any district page, so they have no district here.
+export const DISTRICTS = {
+  "West District I": ["126002", "198010", "126004"],
+  "West District II": ["126028", "126030", "133031", "198014", "198015", "126033", "126034", "198001", "198013", "126035"],
+  "West District III": ["198004", "198002", "198005", "500243", "126031", "198003", "126036", "126003", "198016"],
+  "East District I": ["126001", "126006"],
+  "East District II": ["126020", "198006", "126000"],
+  "North District I": ["126005", "126027", "126010", "126011", "126012", "126017"],
+  "North District II": ["126029", "126007", "112765", "126008", "126009", "126032", "198009", "126013", "126014", "126016"],
+  "Island District I": ["126019", "198007", "126023", "198008", "126026"],
+  "Island District II": ["126018", "126021", "126022", "126024", "126025"],
+};
+export const districtOf = (schoolId) => Object.keys(DISTRICTS).find((name) => DISTRICTS[name].includes(String(schoolId || ""))) || "";

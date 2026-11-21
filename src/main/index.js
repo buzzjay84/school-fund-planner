@@ -1,8 +1,13 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
-import ExcelJS from "exceljs";
+import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
+import updater from "electron-updater"; // CommonJS package: take autoUpdater off the default export
+import { appWorkbook, sobWorkbook } from "./reports.js";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import appIcon from "../image/app_logo.png?asset";
+
+// Keep the data folder the app has always used: with a productName set, Electron would otherwise
+// switch to "%APPDATA%\School Fund Planner" and the saved budget would look lost.
+app.setPath("userData", path.join(app.getPath("appData"), "school-fund-planner"));
 
 // The budget is stored in a SQLite database in the app's data folder
 // (e.g. %APPDATA%\school-fund-planner\fund-planner.db), one row holding the whole budget.
@@ -29,80 +34,59 @@ function saveBudgetRow(json) {
   return databaseFile();
 }
 
-async function saveWorkbook(workbook, title, name) {
-  const { canceled, filePath } = await dialog.showSaveDialog({
+async function saveWorkbook(workbook, title, name, window) {
+  const { canceled, filePath } = await dialog.showSaveDialog(window, {
     title,
     defaultPath: path.join(app.getPath("documents"), name),
     filters: [{ name: "Excel workbook", extensions: ["xlsx"] }],
   });
+  // Electron on Windows can leave the page without keyboard focus after a native dialog: hand it back.
+  window?.focus(); window?.webContents.focus();
   if (canceled || !filePath) return null;
-  await workbook.xlsx.writeFile(filePath);
+  try {
+    await workbook.xlsx.writeFile(filePath);
+  } catch (error) {
+    // Excel locks a workbook while it is open (EBUSY); say so instead of the raw error.
+    if (error.code === "EBUSY") throw new Error(`FILE_OPEN:${path.basename(filePath)}`);
+    throw error;
+  }
   return filePath;
 }
 
-async function exportAllocation({ source, school, schoolId, fiscalYear, annual, aligned }) {
-  const workbook = new ExcelJS.Workbook();
-  const sheet = workbook.addWorksheet("MOOE Allocation");
-  sheet.addRow(["SCHOOL MOOE ALLOCATION"]);
-  sheet.addRow([school || "School"]);
-  sheet.addRow([`School ID: ${schoolId || "—"} | Fiscal year: ${fiscalYear || "—"}`]);
-  sheet.addRow([`Prepared in ${source}`]);
-  sheet.addRow(["Annual NEP allocation", annual]);
-  sheet.addRow([]);
-  sheet.addRow(["MOOE Category", "Default NEP %", "Default allocation", "Realignment", "Aligned allocation", "Aligned %"]);
-  aligned.forEach(({ name, rate, amount }) => sheet.addRow([name, rate, annual * rate, amount - annual * rate, amount, annual ? amount / annual : 0]));
-  const sum = (pick) => aligned.reduce((total, row) => total + pick(row), 0);
-  sheet.addRow(["TOTAL", sum((row) => row.rate), sum((row) => annual * row.rate), sum((row) => row.amount - annual * row.rate), sum((row) => row.amount), annual ? sum((row) => row.amount) / annual : 0]);
-  sheet.columns = [{ width: 42 }, { width: 18 }, { width: 22 }, { width: 20 }, { width: 22 }, { width: 18 }];
-  sheet.getRow(1).font = { bold: true, size: 16, color: { argb: "FFFFFFFF" } };
-  sheet.getRow(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF173A4A" } };
-  sheet.getRow(7).font = { bold: true, color: { argb: "FFFFFFFF" } };
-  sheet.getRow(7).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF356C66" } };
-  for (let row = 8; row <= sheet.rowCount; row += 1) {
-    sheet.getCell(row, 2).numFmt = "0.00%";
-    [3, 4, 5].forEach((col) => { sheet.getCell(row, col).numFmt = '"₱"#,##0.00;-"₱"#,##0.00'; });
-    sheet.getCell(row, 6).numFmt = "0.00%";
-  }
-  return saveWorkbook(workbook, "Save MOOE allocation", "MOOE allocation.xlsx");
-}
+const fileName = (school, label) => `${String(school || "School").replace(/[\\/:*?"<>|]/g, "-")} - ${label}.xlsx`;
 
-async function exportApp({ source, school, schoolId, fiscalYear, items }) {
-  const workbook = new ExcelJS.Workbook();
-  const sheet = workbook.addWorksheet("Quarterly APP", { views: [{ state: "frozen", ySplit: 5, xSplit: 6 }] });
-  sheet.mergeCells("A1:N1");
-  sheet.getCell("A1").value = "ANNUAL PROCUREMENT PLAN — QUARTERLY CONSOLIDATION";
-  sheet.getCell("A1").font = { bold: true, size: 15, color: { argb: "FFFFFFFF" } };
-  sheet.getCell("A1").fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF173A4A" } };
-  sheet.getCell("A1").alignment = { horizontal: "center" };
-  sheet.mergeCells("A2:N2");
-  sheet.getCell("A2").value = `${school} | School ID: ${schoolId || "—"} | FY ${fiscalYear || "—"}`;
-  sheet.getCell("A2").font = { bold: true, size: 12 };
-  sheet.mergeCells("A3:N3");
-  sheet.getCell("A3").value = `Consolidated from monthly SOB workbook: ${source}`;
-  sheet.getCell("A3").font = { italic: true, color: { argb: "FF687983" } };
-  for (let quarter = 0; quarter < 4; quarter += 1) {
-    const start = 7 + quarter * 2;
-    sheet.mergeCells(4, start, 4, start + 1);
-    sheet.getCell(4, start).value = `${quarter + 1}${["st", "nd", "rd", "th"][quarter]} Quarter`;
-  }
-  const headings = ["MOOE Category", "Item Description", "Total Qty", "Unit", "Unit Cost", "Total Amount", "Qty", "Amount", "Qty", "Amount", "Qty", "Amount", "Qty", "Amount"];
-  sheet.addRow([]);
-  sheet.addRow(headings);
-  sheet.getRow(5).font = { bold: true, color: { argb: "FFFFFFFF" } };
-  sheet.getRow(5).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF356C66" } };
-  const sorted = [...items].sort((a, b) => a.category.localeCompare(b.category) || a.description.localeCompare(b.description));
-  for (const item of sorted) {
-    const totalQty = item.quantities.reduce((sum, quantity) => sum + quantity, 0);
-    const totalAmount = item.amounts.reduce((sum, amount) => sum + amount, 0);
-    sheet.addRow([item.category, item.description, totalQty, item.unit, totalQty ? totalAmount / totalQty : 0, totalAmount,
-      item.quantities[0], item.amounts[0], item.quantities[1], item.amounts[1], item.quantities[2], item.amounts[2], item.quantities[3], item.amounts[3]]);
-  }
-  sheet.columns = [30, 34, 12, 12, 16, 18, 10, 16, 10, 16, 10, 16, 10, 16].map((width) => ({ width }));
-  for (let row = 6; row <= sheet.rowCount; row += 1) {
-    for (const col of [5, 6, 8, 10, 12, 14]) sheet.getCell(row, col).numFmt = '"₱"#,##0.00';
-    for (const col of [3, 7, 9, 11, 13]) sheet.getCell(row, col).numFmt = "#,##0.##";
-  }
-  return saveWorkbook(workbook, "Create quarterly APP workbook", `${String(school).replace(/[\\/:*?"<>|]/g, "-")} - Quarterly APP.xlsx`);
+// ── Updates from GitHub Releases (as in ieces-portal): the renderer's update dialog drives
+// check → download → restart & install; status and progress are pushed to it.
+const { autoUpdater } = updater;
+const RELEASES = "https://github.com/buzzjay84/school-fund-planner/releases/latest";
+autoUpdater.autoDownload = false;
+autoUpdater.autoInstallOnAppQuit = true;
+const sendAll = (channel, data) => BrowserWindow.getAllWindows().forEach((window) => window.webContents.send(channel, data));
+autoUpdater.on("checking-for-update", () => sendAll("updater:status", { status: "checking" }));
+autoUpdater.on("update-available", (info) => sendAll("updater:status", { status: "available", version: info.version, releaseDate: info.releaseDate }));
+autoUpdater.on("update-not-available", () => sendAll("updater:status", { status: "up-to-date" }));
+autoUpdater.on("download-progress", (progress) => sendAll("updater:progress", { percent: Math.round(progress.percent) }));
+autoUpdater.on("update-downloaded", (info) => sendAll("updater:status", { status: "downloaded", version: info.version }));
+autoUpdater.on("error", (error) => sendAll("updater:status", { status: "error", message: error.message }));
+
+function buildMenu() {
+  const isMac = process.platform === "darwin";
+  Menu.setApplicationMenu(Menu.buildFromTemplate([
+    ...(isMac ? [{ role: "appMenu" }] : []),
+    { role: "fileMenu" },
+    { role: "editMenu" },
+    { role: "viewMenu" },
+    { role: "windowMenu" },
+    {
+      role: "help",
+      submenu: [
+        { label: "Check for Updates…", click: () => sendAll("menu:checkForUpdates") },
+        { label: "Release Notes", click: () => shell.openExternal(RELEASES) },
+        { type: "separator" },
+        { label: `Version ${app.getVersion()}`, enabled: false },
+      ],
+    },
+  ]));
 }
 
 function createWindow() {
@@ -126,19 +110,29 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
-  ipcMain.handle("allocation:save", (_event, payload) => exportAllocation(payload));
-  ipcMain.handle("app:export", (_event, payload) => exportApp(payload));
+  ipcMain.handle("sob:export", (event, data) => saveWorkbook(sobWorkbook(data), "Save School Operating Budget", fileName(data.school, `SOB ${data.fiscalYear}`), BrowserWindow.fromWebContents(event.sender)));
+  ipcMain.handle("app:export", (event, data) => saveWorkbook(appWorkbook(data), "Save Annual Procurement Plan", fileName(data.school, `APP ${data.fiscalYear}`), BrowserWindow.fromWebContents(event.sender)));
   ipcMain.on("budget:load", (event) => {
     try { event.returnValue = loadBudgetRow(); } catch (error) { console.error(error); event.returnValue = null; }
   });
   ipcMain.on("budget:path", (event) => { event.returnValue = databaseFile(); });
   ipcMain.handle("budget:save", (_event, json) => saveBudgetRow(json));
-  ipcMain.handle("price:search", (_event, item) => {
-    const query = String(item || "").trim().slice(0, 180);
-    if (!query) throw new Error("Enter an item description before checking local prices.");
-    return shell.openExternal(`https://www.google.com/search?hl=en-PH&gl=ph&q=${encodeURIComponent(`${query} price Philippines`)}`);
+  ipcMain.handle("app:version", () => app.getVersion());
+  ipcMain.handle("updater:check", async () => {
+    // electron-updater skips the check silently in an unpackaged (npm run dev) app, so say so.
+    if (!app.isPackaged) return { ok: false, message: "Updates work only in the installed app, not in development mode." };
+    try { await autoUpdater.checkForUpdates(); return { ok: true }; } catch (error) { return { ok: false, message: error.message }; }
   });
+  ipcMain.handle("updater:download", async () => {
+    // macOS only installs updates of a code-signed app; these builds are unsigned, so download the new version by hand.
+    if (process.platform === "darwin") { await shell.openExternal(RELEASES); return { ok: true, external: true }; }
+    try { await autoUpdater.downloadUpdate(); return { ok: true }; } catch (error) { return { ok: false, message: error.message }; }
+  });
+  ipcMain.handle("updater:install", () => autoUpdater.quitAndInstall());
+  buildMenu();
   createWindow();
+  // Quiet check a few seconds after launch; the renderer only speaks up if a new version is found.
+  if (app.isPackaged) setTimeout(() => autoUpdater.checkForUpdates().catch(() => {}), 3000);
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
 

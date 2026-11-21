@@ -1,5 +1,5 @@
 import "./style.css";
-import { SCHOOLS, isSecondary } from "./schools.js";
+import { DISTRICTS, SCHOOLS, districtOf, isSecondary } from "./schools.js";
 
 const app = document.querySelector("#app");
 const STORAGE_KEY = "fund-planner-budget-v1";
@@ -77,13 +77,31 @@ let pendingMove = null;
 let dashExpense = null; // expense shown in the dashboard detail panel
 let appQuarter = null; // quarter (0–3) whose breakdown is open on the Quarterly APP screen
 
+// Resolves true once the budget is on disk, false (with the reason in the status bar) when it is not.
 function saveBudget() {
   const json = JSON.stringify(budget);
   // Outside Electron (no preload) fall back to browser storage.
-  if (!window.sob?.saveBudget) { localStorage.setItem(STORAGE_KEY, json); setStatus("Saved on this machine", "success"); return; }
-  window.sob.saveBudget(json)
-    .then(() => setStatus("Saved on this machine", "success"))
-    .catch((error) => setStatus(`Not saved: ${error.message}`, "error"));
+  if (!window.sob?.saveBudget) { localStorage.setItem(STORAGE_KEY, json); setStatus("Saved on this machine", "success"); return Promise.resolve(true); }
+  return window.sob.saveBudget(json)
+    .then(() => { setStatus("Saved on this machine", "success"); return true; })
+    .catch((error) => { setStatus(`Not saved: ${error.message}`, "error"); return false; });
+}
+
+// In-page dialog instead of window.confirm/alert: Electron's native dialogs leave the window without
+// keyboard focus on Windows, so dropdowns and inputs stop responding until you Alt-Tab away and back.
+// Resolves true for the confirm button; without cancelText it is a plain notice with one button.
+function askDialog({ title, message, confirmText = "OK", cancelText = "", danger = false }) {
+  const opener = document.activeElement;
+  const dialog = document.createElement("dialog");
+  dialog.className = "app-dialog";
+  dialog.innerHTML = `<h2>${escapeHtml(title)}</h2>${message ? `<p>${escapeHtml(message)}</p>` : ""}<div class="dialog-actions">${cancelText ? `<button type="button" class="button ghost" value="cancel">${escapeHtml(cancelText)}</button>` : ""}<button type="button" class="button ${danger ? "danger" : "primary"}" value="ok">${escapeHtml(confirmText)}</button></div>`;
+  document.body.append(dialog);
+  return new Promise((resolve) => {
+    dialog.addEventListener("click", (event) => { if (event.target.value) dialog.close(event.target.value); });
+    dialog.addEventListener("close", () => { resolve(dialog.returnValue === "ok"); dialog.remove(); opener?.focus?.(); });
+    dialog.showModal();
+    dialog.querySelector('[value="ok"]').focus();
+  });
 }
 
 function setStatus(text, kind = "") {
@@ -101,6 +119,7 @@ function shell() {
       <button class="nav-link" data-screen="setup"><span class="nav-number">01</span><span><b>Budget setup</b><small>School fund and MOOE plan</small></span></button>
       <button class="nav-link" data-screen="sob"><span class="nav-number">02</span><span><b>Monthly SOB</b><small>Planned items and costs</small></span></button>
       <button class="nav-link" data-screen="app"><span class="nav-number">03</span><span><b>Quarterly APP</b><small>Procurement by quarter</small></span></button>
+      <button class="nav-link" data-screen="reports"><span class="nav-number">04</span><span><b>Reports</b><small>Excel: SOB and APP</small></span></button>
       <div class="nav-label nav-label-gap">OVERVIEW</div>
       <button class="nav-link" data-screen="dash"><span class="nav-number">◔</span><span><b>Fund dashboard</b><small>Movement of amounts</small></span></button>
       <div class="sidebar-bottom"><span id="side-logo"></span><div><small>BUDGET FILE</small><div id="side-source">Saved locally</div></div></div>
@@ -115,9 +134,9 @@ function shell() {
   document.addEventListener("input", (event) => { if (event.target.matches("[data-money]")) formatMoneyInput(event.target); });
   document.addEventListener("focusout", (event) => { if (event.target.matches("[data-money]") && event.target.value) event.target.value = amount(event.target.value); });
   document.querySelectorAll("[data-screen]").forEach((button) => button.addEventListener("click", () => { screen = button.dataset.screen; render(); }));
-  document.querySelector("#new-budget").addEventListener("click", () => {
+  document.querySelector("#new-budget").addEventListener("click", async () => {
     if (!budget.categories.length && !budget.items.length && !budget.profile.school) return;
-    if (window.confirm("Start a new budget? Your current data saved in Fund Planner will be replaced.")) {
+    if (await askDialog({ title: "Start a new budget?", message: "Your current data saved in Fund Planner will be replaced.", confirmText: "Start new budget", cancelText: "Cancel", danger: true })) {
       budget = emptyBudget(); screen = "setup"; saveBudget(); render();
     }
   });
@@ -187,7 +206,7 @@ function setupScreen() {
       <td><button class="icon-button remove-category" data-remove-category="${category.id}" aria-label="Remove category">×</button></td>
     </tr>${pendingMove?.id === category.id ? moveRow(category) : ""}`).join("");
   document.querySelector("#content").innerHTML = `
-    <div class="page-heading"><div><span class="step-tag">STEP 01 <i>•</i> BUDGET PREPARATION</span><h1>Set up the school fund</h1><p>Enter the annual school allocation and decide how the MOOE fund will be assigned.</p></div><button class="button primary" id="export-allocation" ${budget.categories.length ? "" : "disabled"}>Export allocation</button></div>
+    <div class="page-heading"><div><span class="step-tag">STEP 01 <i>•</i> BUDGET PREPARATION</span><h1>Set up the school fund</h1><p>Enter the annual school allocation and decide how the MOOE fund will be assigned.</p></div></div>
     <section class="panel setup-panel"><div class="panel-heading">${budget.profile.school
       ? `<div class="school-identity">${logoBadge(budget.profile.school, "lg")}<div><h2>${escapeHtml(budget.profile.school)}</h2><p>School ID ${escapeHtml(budget.profile.schoolId) || "not assigned"} · Fiscal year ${number(budget.profile.fiscalYear) || "—"} · Appears on all exports</p></div></div>`
       : `<div><h2>School details</h2><p>Choose the school. Its name and ID appear in the budget and procurement exports.</p></div>`}</div>
@@ -242,11 +261,11 @@ function setupScreen() {
     category[field] = field === "name" ? input.value : number(input.value);
     saveBudget(); render();
   }));
-  document.querySelectorAll("[data-remove-category]").forEach((button) => button.addEventListener("click", () => {
+  document.querySelectorAll("[data-remove-category]").forEach((button) => button.addEventListener("click", async () => {
     const id = button.dataset.removeCategory;
     if (budget.items.some((item) => item.categoryId === id)) { setStatus("Remove or change the SOB items using this category first", "warning"); return; }
     const category = budget.categories.find((entry) => entry.id === id);
-    if (alignedAmount(category) > 0 && !window.confirm(`Remove ${category.name || "this expense"}? Its ${money(alignedAmount(category))} goes back to Remaining to assign so you can realign it to other expenses.`)) return;
+    if (alignedAmount(category) > 0 && !(await askDialog({ title: `Remove ${category.name || "this expense"}?`, message: `Its ${money(alignedAmount(category))} goes back to Remaining to assign so you can realign it to other expenses.`, confirmText: "Remove", cancelText: "Cancel", danger: true }))) return;
     budget.categories = budget.categories.filter((category) => category.id !== id); saveBudget(); render();
   }));
   document.querySelector("#move-cancel")?.addEventListener("click", () => { pendingMove = null; render(); });
@@ -263,7 +282,6 @@ function setupScreen() {
     pendingMove = null; saveBudget(); render();
   });
   document.querySelector("#move-source")?.focus();
-  document.querySelector("#export-allocation")?.addEventListener("click", exportAllocation);
 }
 
 // Mirrors the BREAKDOWN sheet's month rows: each category's planned spending per month and what is left by December.
@@ -288,7 +306,8 @@ function repeatedItems() {
 }
 // Bank charges = purchase of checks: 2 checks at ₱500 each, every quarter (Jan, Apr, Jul, Oct).
 function quarterlyItems() {
-  return budget.categories.filter((category) => /bank charges/i.test(category.name || ""))
+  // Only when the aligned amount covers the year's 8 checks (₱4,000); otherwise the school plans them itself.
+  return budget.categories.filter((category) => /bank charges/i.test(category.name || "") && alignedAmount(category) >= 4000)
     .flatMap((category) => [0, 3, 6, 9].map((index) => ({ id: `qtr-${category.id}-${index}`, auto: true, quarterly: true, month: months[index], categoryId: category.id, description: "Purchase of Checks", quantity: 2, unit: "pcs", unitCost: 500 })));
 }
 // Semi-expendable property (below ₱50,000 per unit): typical items per kind as [name, unit, unit cost]; cost 0 = type it.
@@ -416,6 +435,8 @@ function monthBreakdown(month) {
   let runningTotal = 0;
   const forms = [];
   const exhausted = [];
+  const skipped = budget.skipped?.[month] || []; // category ids the user removed from this month
+  const removed = [];
   const groups = budget.categories.map((category) => {
     const balance = cents(alignedAmount(category) - spentBefore(category));
     const rows = items.filter((item) => item.month === month && item.categoryId === category.id);
@@ -424,6 +445,8 @@ function monthBreakdown(month) {
     runningTotal += left;
     // Used up in earlier months and nothing planned this month: leave it out of this and later months.
     if (balance <= 0.004 && spentBefore(category) > 0 && !rows.length) { exhausted.push(category.name || "Unnamed category"); return ""; }
+    // Removed by the user for this month; comes back on its own once an item lands in it (e.g. a January repeat).
+    if (!rows.length && skipped.includes(category.id)) { removed.push(category); return ""; }
     const formId = `add-${category.id}`;
     const [, presetUnit, suggestions] = categoryHint(category);
     // Auto-billed expenses only open an entry row on demand (+); electricity is the bill alone, no extra items.
@@ -446,7 +469,7 @@ function monthBreakdown(month) {
         <td><button class="icon-button add" form="${formId}" type="submit" aria-label="Add item to ${escapeHtml(category.name || "category")}">+</button></td></tr>`;
     };
     return `<tbody class="sob-group">
-      <tr class="group-row"><td colspan="3"></td><td class="number">${amount(balance)}</td><th colspan="8" scope="rowgroup">${escapeHtml(category.name || "Unnamed category")}</th></tr>
+      <tr class="group-row"><td colspan="3"></td><td class="number">${amount(balance)}</td><th colspan="7" scope="rowgroup">${escapeHtml(category.name || "Unnamed category")}</th><td>${rows.length ? "" : `<button type="button" class="icon-button" data-skip="${category.id}" title="Nothing planned this month" aria-label="Remove ${escapeHtml(category.name || "category")} from ${month}">×</button>`}</td></tr>
       ${rows.map((item, row) => `<tr${item.auto ? ` class="auto-row"` : ""}><td>${escapeHtml(item.aipNo || "")}</td><td>${escapeHtml(item.page || "")}</td><td></td><td></td><td class="number">${row + 1}</td><td class="number">${number(item.quantity)}</td><td>${escapeHtml(item.unit)}</td><td><span class="category-name">${escapeHtml(item.description)}</span>${item.repeat ? ` <span class="auto-tag" title="Set in January; change or remove it there">From January</span>` : item.quarterly ? ` <span class="auto-tag" title="Planned automatically each quarter">Auto · quarterly</span>` : item.auto ? ` <span class="auto-tag" title="Planned automatically: aligned amount ÷ 12">Auto · monthly</span>` : ""}</td><td class="number">${amount(item.unitCost)}${payNote(item, category)}</td><td class="number">${amount(itemCost(item))}</td><td></td><td>${item.auto ? "" : `<button class="icon-button" data-remove-item="${item.id}" aria-label="Remove ${escapeHtml(item.description)}">×</button>`}</td></tr>`).join("")}
       ${billOnly ? "" : [
         ...readyRows.map(([description, unit, unitCost], at) => entryRow(`${formId}-d${at}`, { description, unit, unitCost }, false, rows.length + at + 1)),
@@ -472,8 +495,10 @@ function monthBreakdown(month) {
       <tbody><tr class="budget-row"><td colspan="2"></td><td class="number">${amount(nep)}</td><td class="number">${amount(cents(nep - spentBefore()))}</td><td colspan="8"></td></tr></tbody>
       ${groups}
       ${exhausted.length ? `<tbody><tr class="exhausted-row"><td colspan="12">✓ Used up in earlier months, not shown: ${exhausted.map(escapeHtml).join(", ")}</td></tr></tbody>` : ""}
+      ${removed.length ? `<tbody><tr class="removed-row"><td colspan="12">Removed from ${month}: ${removed.map((category) => `<span class="removed-item">${escapeHtml(category.name || "Unnamed category")} <button type="button" class="button ghost small" data-unskip="${category.id}">Add back</button></span>`).join("")}</td></tr></tbody>` : ""}
       <tfoot><tr><td colspan="9" class="number">GRAND TOTAL<small>Monthly allocation (NEP ÷ 12) ${money(release)}</small></td><td class="number">${amount(grand)}</td><td class="number">${amount(cents(runningTotal))}</td><td></td></tr></tfoot>
     </table></div>
+    <div class="month-funds${gap < -0.004 ? " over" : ""}" aria-live="polite"><span>${month} funds</span><span>Allocation <b>${amount(release)}</b></span><span>Planned <b>${amount(grand)}</b></span><span class="month-funds-left">${gap < -0.004 ? "Over" : "Available"} <b>${amount(Math.abs(gap))}</b></span></div>
     ${forms.map(([formId, categoryId]) => `<form id="${formId}" data-category-form="${categoryId}" hidden></form>`).join("")}
   </section>`;
 }
@@ -523,6 +548,15 @@ function sobScreen() {
       button.hidden = true;
       breakdown.querySelector(`[data-entry="${button.dataset.reveal}"]`).hidden = false;
       breakdown.querySelector(`[form="${button.dataset.reveal}"][name="quantity"]`).focus();
+    }));
+    breakdown.querySelectorAll("[data-skip]").forEach((button) => button.addEventListener("click", () => {
+      const skipped = ((budget.skipped ||= {})[formMonth] ||= []);
+      if (!skipped.includes(button.dataset.skip)) skipped.push(button.dataset.skip);
+      saveBudget(); showMonth();
+    }));
+    breakdown.querySelectorAll("[data-unskip]").forEach((button) => button.addEventListener("click", () => {
+      budget.skipped[formMonth] = budget.skipped[formMonth].filter((id) => id !== button.dataset.unskip);
+      saveBudget(); showMonth();
     }));
     breakdown.querySelectorAll("[data-remove-item]").forEach((button) => button.addEventListener("click", () => { budget.items = budget.items.filter((item) => item.id !== button.dataset.removeItem); saveBudget(); render(); }));
     breakdown.querySelector(".sob-table").addEventListener("input", (event) => { if (event.target.form) checkRoom(event.target.form); });
@@ -614,24 +648,160 @@ function quarterBreakdown(quarter) {
       <tfoot><tr><td colspan="8" class="number">Quarter total</td><td class="number">${amount(quarterTotal)}</td></tr></tfoot></table></div></section>`;
 }
 
-async function exportAllocation() {
-  try {
-    const output = await window.sob.saveAllocation({ source: "Fund Planner", school: budget.profile.school, schoolId: budget.profile.schoolId, fiscalYear: budget.profile.fiscalYear, annual: number(budget.profile.nep), aligned: budget.categories.map((category) => ({ name: category.name || "Unnamed category", rate: number(category.rate) / 100, amount: alignedAmount(category) })) });
-    if (output) setStatus(`Allocation exported · ${output.split(/[\\/]/).pop()}`, "success");
-  } catch (error) { setStatus(error.message || "Could not export allocation", "error"); }
+// Signature lines for the reports. An ASDS approves as OIC of the SDS office; the district supervisor's office is the district.
+function signatories() {
+  const report = budget.report || {};
+  const oic = report.approvedPosition === ASDS ? "OIC - Office of the Schools Division Superintendent" : "";
+  return {
+    preparedBy: signatoryName(report.preparedBy), preparedPosition: report.preparedPosition,
+    sobRecommendedBy: signatoryName(report.sobRecommendedBy), sobRecommendedPosition: "Public Schools District Supervisor", sobRecommendedOffice: reportDistrict(),
+    sobApprovedBy: signatoryName(report.approvedBy), sobApprovedPosition: report.approvedPosition, sobApprovedOffice: oic,
+    appRecommendedBy: signatoryName(report.appRecommendedBy), appRecommendedPosition: report.appRecommendedPosition,
+    appApprovedBy: signatoryName(report.approvedBy), appApprovedPosition: report.approvedPosition, appApprovedOffice: oic,
+  };
 }
 
-async function exportApp() {
+// Everything the Excel reports need, laid out like the school workbooks (see src/main/reports.js).
+// A month sheet lists the same categories the Monthly SOB screen shows for that month.
+function reportData() {
+  const items = allItems();
+  const school = budget.profile.school || "School";
+  const logo = findSchool(school)?.logo;
+  const plain = ({ aipNo, page, quantity, unit, description, unitCost }) => ({ aipNo: aipNo || "", page: page || "", quantity: number(quantity), unit, description, unitCost: number(unitCost) });
+  const lines = new Map();
+  items.forEach((item) => {
+    const category = budget.categories.find((entry) => entry.id === item.categoryId)?.name || "Uncategorized";
+    const key = `${category}\u0000${item.description}\u0000${item.unit}\u0000${number(item.unitCost)}`;
+    if (!lines.has(key)) lines.set(key, { category, description: item.description, unit: item.unit, unitCost: number(item.unitCost), quantities: [0, 0, 0, 0] });
+    lines.get(key).quantities[quarterForMonth(item.month)] += number(item.quantity);
+  });
+  return {
+    school, schoolId: budget.profile.schoolId || "", fiscalYear: number(budget.profile.fiscalYear) || new Date().getFullYear(), nep: number(budget.profile.nep),
+    abbr: logo ? logo.replace(/\.png$/i, "").toUpperCase() : initials(school),
+    level: isSecondary(school) ? "(Junior High School)" : "(Elementary School)",
+    district: reportDistrict(), signatories: signatories(),
+    categories: budget.categories.map((category) => ({ name: category.name || "Unnamed category", rate: number(category.rate) / 100, aligned: alignedAmount(category), realigned: cents(alignedAmount(category) - defaultAmount(category)) })),
+    months: months.map((month, index) => budget.categories.map((category, at) => {
+      const rows = items.filter((item) => item.month === month && item.categoryId === category.id);
+      const spentBefore = total(items.filter((item) => item.categoryId === category.id && months.indexOf(item.month) < index).map(itemCost));
+      const hidden = !rows.length && ((budget.skipped?.[month] || []).includes(category.id) || (cents(alignedAmount(category) - spentBefore) <= 0.004 && spentBefore > 0));
+      return hidden ? null : { index: at, items: rows.map(plain) };
+    }).filter(Boolean)),
+    lines: [...lines.values()],
+    realignments: realignmentRows(),
+  };
+}
+
+// BREAKDOWN realignment rows from the moves logged in Budget setup: −amount under the expense it came from,
+// +amount under the one it went to ("Remaining to assign" has no column, so that side is left out).
+// Whatever the moves don't explain (renamed or re-added expenses, NEP changes) goes in one last row, so TOTAL matches.
+function realignmentRows() {
+  const indexOf = (name) => budget.categories.findIndex((category) => (category.name || "Unnamed category") === name);
+  const rows = (budget.moves || []).filter((move) => number(move.amount) > 0).map((move) => {
+    const values = {};
+    const from = indexOf(move.from); const to = indexOf(move.to);
+    if (from >= 0) values[from] = cents((values[from] || 0) - number(move.amount));
+    if (to >= 0) values[to] = cents((values[to] || 0) + number(move.amount));
+    return { values };
+  }).filter((row) => Object.keys(row.values).length);
+  const rest = {};
+  budget.categories.forEach((category, index) => {
+    const left = cents(alignedAmount(category) - defaultAmount(category) - rows.reduce((sum, row) => sum + (row.values[index] || 0), 0));
+    if (Math.abs(left) >= 0.01) rest[index] = left;
+  });
+  return Object.keys(rest).length ? [...rows, { label: "Other adjustments", values: rest }] : rows;
+}
+
+const REPORTS = {
+  sob: ["exportSob", "SOB"],
+  app: ["exportApp", "APP"],
+};
+async function exportReport(kind) {
+  const [call, label] = REPORTS[kind];
   try {
-    const output = await window.sob.exportApp({ source: "Fund Planner", school: budget.profile.school || "School", schoolId: budget.profile.schoolId, fiscalYear: budget.profile.fiscalYear, items: consolidatedItems() });
-    if (output) setStatus(`APP exported · ${output.split(/[\\/]/).pop()}`, "success");
-  } catch (error) { setStatus(error.message || "Could not export APP", "error"); }
+    const output = await window.sob[call](reportData());
+    if (output) setStatus(`${label} exported · ${output.split(/[\\/]/).pop()}`, "success");
+  } catch (error) {
+    // Electron prefixes main-process errors with "Error invoking remote method …: Error: ".
+    const message = String(error.message || "").replace(/^Error invoking remote method '[^']+': (Error: )?/, "");
+    const open = /^FILE_OPEN:(.*)$/.exec(message);
+    if (open) {
+      setStatus(`${label} not saved · ${open[1]} is open in Excel`, "warning");
+      await askDialog({ title: "Close the file in Excel first", message: `${open[1]} is open in Excel, so it can't be replaced. Close it in Excel, then click Download Excel again.` });
+      return;
+    }
+    setStatus(message || `Could not export ${label}`, "error");
+  }
+}
+const exportApp = () => exportReport("app");
+
+// Signatories and district printed on the reports, saved with the budget.
+// A field is [key, label, placeholder] for a name, or [key, label, options] for a dropdown.
+const SDS = "Schools Division Superintendent";
+const ASDS = "Assistant Schools Division Superintendent";
+const SIGN_FIELDS = [
+  ["Prepared by (SOB and APP)", [["preparedBy", "Name", "School head"], ["preparedPosition", "Position", ["Principal I", "Principal II", "Principal III", "Principal IV", "School Head"]]]],
+  ["SOB · Recommending approval (Public Schools District Supervisor)", [["sobRecommendedBy", "Name", "District supervisor"], ["district", "District", Object.keys(DISTRICTS)]]],
+  ["Approved by (SOB and APP)", [["approvedBy", "Name", ""], ["approvedPosition", "Position", [[SDS, "SDS · Schools Division Superintendent"], [ASDS, "ASDS · signs as OIC - Office of the SDS"]]]]],
+  ["APP · Recommending approval", [["appRecommendedBy", "Name", "Accountant"], ["appRecommendedPosition", "Position", ["Accountant I", "Accountant II", "Accountant III"]]]],
+];
+// Signatory names print in capitals, except degrees that keep their own spelling: "juan dela cruz, edd, ceso vi" → "JUAN DELA CRUZ, Ed.D, CESO VI".
+const DEGREES = { edd: "Ed.D", phd: "Ph.D", maed: "MaEd" };
+const NAME_KEYS = new Set(["preparedBy", "sobRecommendedBy", "approvedBy", "appRecommendedBy"]);
+const signatoryName = (text) => String(text || "").replace(/[A-Za-z.]+/g, (word) => DEGREES[word.replace(/\./g, "").toLowerCase()] || word.toUpperCase());
+console.assert(signatoryName("ma. laarni t. villanueva, edd, ceso vi") === "MA. LAARNI T. VILLANUEVA, Ed.D, CESO VI" && signatoryName("Ana Cruz, PH.D, maed") === "ANA CRUZ, Ph.D, MaEd", "signatoryName");
+
+// The school's district from the division list, unless the user picked another one.
+const reportDistrict = () => budget.report?.district || districtOf(budget.profile.schoolId);
+const signField = ([key, labelText, choice]) => {
+  const value = key === "district" ? reportDistrict() : NAME_KEYS.has(key) ? signatoryName(budget.report?.[key]) : budget.report?.[key] || "";
+  if (!Array.isArray(choice)) return `<label>${labelText}<input data-sign="${key}" value="${escapeHtml(value)}" placeholder="${escapeHtml(choice)}"></label>`;
+  return `<label>${labelText}<select data-sign="${key}"><option value="" ${value ? "" : "selected"} disabled>Choose</option>${choice.map((option) => {
+    const [optionValue, text] = Array.isArray(option) ? option : [option, option];
+    return `<option value="${escapeHtml(optionValue)}" ${optionValue === value ? "selected" : ""}>${escapeHtml(text)}</option>`;
+  }).join("")}</select></label>`;
+};
+
+function reportsScreen() {
+  const ready = budget.categories.length > 0;
+  const card = (kind, name, text) => `<div class="report-card"><div><h3>${name}</h3><p>${text}</p></div><button class="button primary" data-report="${kind}" ${ready ? "" : "disabled"}>Download Excel</button></div>`;
+  document.querySelector("#content").innerHTML = `
+    <div class="page-heading"><div><span class="step-tag">STEP 04 <i>•</i> REPORTS</span><h1>Download the Excel reports</h1><p>Same layout as the school workbooks, with formulas: change a quantity or unit cost in Excel and the subtotals, balances and later months update.</p></div></div>
+    <section class="panel"><div class="report-list">
+      ${card("sob", "School Operating Budget", "MOOE alignment (BREAKDOWN sheet: D.O. breakdown, each realignment, proposed amounts) plus one sheet per month, JAN to DEC. Each month's balance carries into the next.")}
+      ${card("app", "Annual Procurement Plan", "Items by expense group with quantity and amount per quarter, sub-totals and the year total.")}
+    </div>${ready ? "" : `<p class="form-hint report-hint">Set up the MOOE categories in Budget setup first.</p>`}</section>
+    <section class="panel"><div class="panel-heading"><div><h2>Signatories</h2><p>Printed at the bottom of the reports. Saved with this budget.</p></div><button type="button" class="button primary" id="save-signatories">Save</button></div>
+      ${SIGN_FIELDS.map(([group, fields]) => `<div class="sign-group"><h3>${group}</h3><div class="setup-fields">${fields.map(signField).join("")}</div></div>`).join("")}
+    </section>`;
+  document.querySelectorAll("[data-report]").forEach((button) => button.addEventListener("click", () => exportReport(button.dataset.report)));
+  // Names turn to capitals while typing; the caret keeps its distance from the end, since "edd" → "Ed.D" adds a character.
+  document.querySelectorAll("input[data-sign]").forEach((input) => NAME_KEYS.has(input.dataset.sign) && input.addEventListener("input", () => {
+    const fromEnd = input.value.length - input.selectionStart;
+    input.value = signatoryName(input.value);
+    input.setSelectionRange(input.value.length - fromEnd, input.value.length - fromEnd);
+  }));
+  document.querySelectorAll("[data-sign]").forEach((input) => input.addEventListener("change", () => { (budget.report ||= {})[input.dataset.sign] = input.value.trim(); saveBudget(); }));
+  // Explicit save: takes every field as shown (including the auto-filled district) and confirms on the button.
+  const saveButton = document.querySelector("#save-signatories");
+  saveButton.addEventListener("click", async () => {
+    if (!(await askDialog({ title: "Save signatories?", message: "These names and positions will print on the SOB and APP reports.", confirmText: "Save", cancelText: "Cancel" }))) return;
+    budget.report ||= {};
+    document.querySelectorAll("[data-sign]").forEach((input) => { budget.report[input.dataset.sign] = input.value.trim(); });
+    // Keep the district automatic (follows the school) unless the user picked a different one.
+    if (budget.report.district === districtOf(budget.profile.schoolId)) budget.report.district = "";
+    const saved = await saveBudget();
+    await askDialog(saved
+      ? { title: "Signatories saved", message: "They will appear on the next reports you download." }
+      : { title: "Not saved", message: "The signatories could not be saved. See the message at the top of the window, then try again." });
+    reportsScreen(); // redraw so every field shows what was saved
+  });
 }
 
 let shownScreen = null;
 function render() {
   updateContext();
-  if (screen === "setup") setupScreen(); else if (screen === "sob") sobScreen(); else if (screen === "dash") dashboardScreen(); else appScreen();
+  if (screen === "setup") setupScreen(); else if (screen === "sob") sobScreen(); else if (screen === "dash") dashboardScreen(); else if (screen === "reports") reportsScreen(); else appScreen();
   // Animate only on a tab change; render() also runs on every edit.
   if (shownScreen !== null && shownScreen !== screen && !matchMedia("(prefers-reduced-motion: reduce)").matches) {
     document.querySelector("#content").animate([{ opacity: 0, transform: "translateY(10px)" }, { opacity: 1, transform: "none" }], { duration: 260, easing: "cubic-bezier(.2, .7, .2, 1)" });
@@ -787,3 +957,57 @@ shell();
 render();
 // First start on SQLite: copy the budget kept in browser storage into the database.
 if (window.sob?.loadBudget && !window.sob.loadBudget() && localStorage.getItem(STORAGE_KEY)) saveBudget();
+
+// ── Check for Updates (Help menu), like ieces-portal: checking → up to date / available → downloading → restart & install.
+let updateDialog = null;
+const isMac = /Mac/i.test(navigator.platform);
+
+function renderUpdate(data) {
+  if (!updateDialog) return;
+  const body = updateDialog.querySelector(".update-body");
+  const button = (id, text) => `<button type="button" class="button primary" id="${id}">${text}</button>`;
+  const views = {
+    checking: `<div class="update-spinner" aria-hidden="true"></div><p>Checking for updates…</p>`,
+    "up-to-date": `<div class="update-icon ok" aria-hidden="true">✓</div><p class="gain">You're on the latest version${updateDialog.dataset.version ? ` (v${escapeHtml(updateDialog.dataset.version)})` : ""}.</p>`,
+    available: `<div class="update-icon new" aria-hidden="true">↑</div><p><strong>v${escapeHtml(data.version)}</strong> is available!</p>${data.releaseDate ? `<p class="muted">Released ${new Date(data.releaseDate).toLocaleDateString("en-PH")}</p>` : ""}${button("update-download", isMac ? "Download from GitHub" : "Download update")}`,
+    downloading: `<progress max="100" value="${data.percent || 0}" aria-label="Download progress"></progress><p>Downloading… ${data.percent || 0}%</p>`,
+    downloaded: `<div class="update-icon ok" aria-hidden="true">✓</div><p class="gain">v${escapeHtml(data.version)} is ready. Restart to install.</p>${button("update-install", "Restart &amp; install")}`,
+    external: `<div class="update-icon new" aria-hidden="true">↑</div><p>The download page opened in your browser. Install the new version over this one; your budget stays.</p>`,
+    error: `<div class="update-icon err" aria-hidden="true">✕</div><p class="loss">Update check failed.</p><p class="muted">${escapeHtml(data.message || "Could not reach the update server.")}</p>`,
+  };
+  body.innerHTML = views[data.status] || "";
+  body.querySelector("#update-download")?.addEventListener("click", async () => {
+    renderUpdate({ status: "downloading", percent: 0 });
+    const result = await window.sob.downloadUpdate();
+    if (result?.external) renderUpdate({ status: "external" });
+    else if (!result?.ok) renderUpdate({ status: "error", message: result?.message });
+  });
+  body.querySelector("#update-install")?.addEventListener("click", () => window.sob.installUpdate());
+  body.querySelector("button")?.focus();
+}
+
+// Opens the dialog and checks; with a status (an update found by the quiet check at launch) it just shows that.
+async function openUpdateDialog(status) {
+  if (updateDialog) { if (status) renderUpdate(status); return; }
+  const dialog = updateDialog = document.createElement("dialog");
+  updateDialog.className = "app-dialog update-dialog";
+  updateDialog.innerHTML = `<div class="update-head"><h2>Check for Updates</h2><button type="button" class="icon-button" aria-label="Close">×</button></div><div class="update-body" aria-live="polite"></div>`;
+  updateDialog.querySelector(".update-head button").addEventListener("click", () => updateDialog.close());
+  updateDialog.addEventListener("close", () => { updateDialog.remove(); updateDialog = null; });
+  document.body.append(updateDialog);
+  updateDialog.showModal();
+  const version = (await window.sob.appVersion?.()) || "";
+  if (updateDialog !== dialog) return; // closed while waiting
+  dialog.dataset.version = version;
+  if (status) { renderUpdate(status); return; }
+  renderUpdate({ status: "checking" });
+  const result = await window.sob.checkForUpdates();
+  if (!result?.ok && updateDialog === dialog) renderUpdate({ status: "error", message: result?.message });
+}
+
+if (window.sob?.onUpdaterStatus) {
+  // With the dialog closed, only news worth interrupting for opens it: a new version, or one ready to install.
+  window.sob.onUpdaterStatus((data) => (updateDialog ? renderUpdate(data) : ["available", "downloaded"].includes(data.status) && openUpdateDialog(data)));
+  window.sob.onUpdaterProgress(({ percent }) => renderUpdate({ status: "downloading", percent }));
+  window.sob.onMenuCheckForUpdates(() => openUpdateDialog());
+}

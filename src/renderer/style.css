@@ -365,3 +365,53 @@ button.quarter-card.active { border-color: var(--accent); background: var(--acce
 .shift-bar, .meter-fill { animation: grow-x .7s cubic-bezier(.2, .7, .2, 1) both; }
 .shift-bar.plus, .meter-fill { transform-origin: left; }
 .shift-bar.minus { transform-origin: right; }
+
+/* Floating monthly funds bar: sticky keeps its own slot at the end of the table, so it never covers rows at rest. */
+.panel:has(.month-funds) { overflow: clip; } /* overflow: hidden would disable sticky */
+.month-funds { position: sticky; bottom: 0; z-index: 2; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 28px; padding: 12px 24px; border-top: 1px solid var(--line); background: rgba(255, 255, 255, .92); backdrop-filter: blur(8px); box-shadow: 0 -6px 16px rgba(17, 24, 39, .06); color: var(--muted); font-size: 13px; }
+.month-funds > span:first-child { color: var(--ink); font-weight: 700; }
+.month-funds b { margin-left: 6px; color: var(--ink); font-variant-numeric: tabular-nums; }
+.month-funds-left { margin-left: auto; }
+.month-funds-left b { color: var(--accent-hover); font-size: 15px; }
+.month-funds.over .month-funds-left, .month-funds.over .month-funds-left b { color: var(--danger); }
+
+/* Categories removed from one month, with a way to bring them back. */
+.removed-row td { padding: 10px 14px !important; background: var(--surface-sunken); color: var(--muted); font-size: 13px; white-space: normal !important; }
+.removed-item { display: inline-flex; align-items: center; gap: 6px; margin: 2px 0 2px 14px; color: var(--ink-2); font-weight: 600; }
+.button.small { height: 26px; padding: 0 10px; font-size: 12px; }
+
+/* Reports screen */
+.report-list { display: grid; }
+.report-card { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 18px 24px; border-bottom: 1px solid var(--line); }
+.report-card:last-child { border-bottom: 0; }
+.report-card h3, .sign-group h3 { color: var(--ink); font: 600 15px/1.3 var(--font-display); }
+.report-card p { margin-top: 3px; color: var(--muted); font-size: 13px; }
+.report-hint { padding: 0 24px 16px; }
+.sign-group { padding: 16px 24px 4px; border-bottom: 1px solid var(--line); }
+.sign-group:last-child { border-bottom: 0; }
+.sign-group .setup-fields { padding: 10px 0 12px; }
+.sign-group .setup-fields { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+/* In-page confirm/notice dialog (replaces window.confirm, which breaks focus in Electron). */
+.app-dialog { width: min(420px, calc(100vw - 32px)); padding: 24px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); color: var(--ink); box-shadow: 0 24px 48px rgba(17, 24, 39, .18); }
+.app-dialog::backdrop { background: rgba(17, 24, 39, .35); }
+.app-dialog h2 { font: 600 17px/1.3 var(--font-display); }
+.app-dialog p { margin-top: 8px; color: var(--muted); font-size: 14px; line-height: 1.5; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
+.button.danger { background: var(--danger); color: #fff; }
+.button.danger:hover { background: #9a3524; }
+
+/* Check for Updates dialog */
+.update-dialog { padding: 0; }
+.update-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 16px 16px 24px; border-bottom: 1px solid var(--line); }
+.update-body { display: grid; justify-items: center; gap: 10px; padding: 28px 24px; text-align: center; }
+.update-body p { margin: 0; color: var(--ink-2); font-size: 14px; }
+.update-body .button { margin-top: 8px; }
+.update-body progress { width: 100%; height: 10px; accent-color: var(--accent); }
+.update-icon { display: grid; place-items: center; width: 48px; height: 48px; border-radius: 50%; font-size: 24px; font-weight: 700; }
+.update-icon.ok { background: #ecfdf5; color: #047857; }
+.update-icon.new { background: var(--accent-soft); color: var(--accent); }
+.update-icon.err { background: var(--danger-soft); color: var(--danger); }
+.update-spinner { width: 36px; height: 36px; border: 3px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: update-spin .8s linear infinite; }
+@keyframes update-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .update-spinner { animation-duration: 2.4s; } }
